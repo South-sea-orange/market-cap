@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+backend/.env
+backend/.kis_token.json
+backend/logo_cache/
+backend/update.log
+backend/marketcaps.json.tmp
+.DS_Store
+.claude/
+*.bak
+*.tmp

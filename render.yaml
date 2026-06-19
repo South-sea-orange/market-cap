@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: mcap
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    autoDeploy: true   # GitHub 에 push 하면 자동 재배포
