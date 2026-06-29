@@ -32,13 +32,16 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 @app.on_event("startup")
 def _schedule_daily_update():
-    """매일 한국시간 07:00 에 companiesmarketcap 에서 데이터 갱신. 서버 시작 시 데이터가 오래됐으면 즉시 1회 갱신.
+    """매일 한국시간 07:00 에 companiesmarketcap 에서 데이터 갱신. 07:00 이후 서버 시작 시 오늘 갱신이 없으면 즉시 1회 보완.
     (서버가 터미널 권한을 물려받아 Desktop 접근이 되므로 별도 권한설정 불필요. 서버가 꺼져 있으면 다음 실행 때 갱신.)"""
     KST = datetime.timezone(datetime.timedelta(hours=9))
 
-    def _stale():
+    def _missed_today_update():
         try:
-            return data.load().get("as_of") != datetime.datetime.now(KST).strftime("%Y-%m-%d")
+            now = datetime.datetime.now(KST)
+            if now.hour < 7:
+                return False
+            return data.load().get("as_of") != now.strftime("%Y-%m-%d")
         except Exception:
             return True
 
@@ -59,8 +62,8 @@ def _schedule_daily_update():
             print(f"[update] 갱신 실패(기존 데이터 유지): {e}")
 
     def loop():
-        if _stale():
-            print("[update] 데이터가 오래됨 → 시작 시 1회 갱신")
+        if _missed_today_update():
+            print("[update] 오늘 07:00 갱신 누락 → 시작 시 1회 보완")
             _run()
         while True:
             time.sleep(_secs_to_7am())
@@ -120,7 +123,7 @@ def rankings(group: str = "ALL"):
         real = sum(1 for y in h if 2020 <= int(y) <= 2025) >= 4
         out.append({"sym": sym, "name": r["name"], "cc": r["cc"], "now": round(cur, 2),
                     "hist": h, "real_history": real})
-    return {"group": g, "as_of": d["as_of"],
+    return {"group": g, "as_of": d["as_of"], "updated_at": d.get("updated_at", d.get("as_of", "")),
             "source": d["source"] + (" + KIS(live KR)" if live else ""),
             "fx_krw_per_usd": d["fx_krw_per_usd"], "companies": out}
 

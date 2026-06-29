@@ -94,6 +94,49 @@ def fx_rate(default):
     return default
 
 
+# ── 한국: 네이버 금융 시가총액(보통주, 원화) ───────────────────────────────
+# cmc 한국 시총은 우선주 포함이라 실제와 다름 → 한국 현재값은 네이버에서 받아 덮어씀.
+NAVER_TO_CMC = {
+    "009150.KS": "009155.KS", "006400.KS": "006405.KS", "006800.KS": "006805.KS",
+    "096770.KS": "096775.KS", "105560.KS": "KB", "055550.KS": "SHG", "005490.KS": "PKX",
+    "015760.KS": "KEP", "316140.KS": "WF", "017670.KS": "SKM",
+}
+CMC_TO_NAVER = {v: k for k, v in NAVER_TO_CMC.items()}
+ETF_PREFIX = ("KODEX", "TIGER", "KBSTAR", "ARIRANG", "KOSEF", "HANARO", "ACE", "SOL",
+              "PLUS", "RISE", "TIMEFOLIO", "KIWOOM", "KINDEX", "TREX", "FOCUS", "KoAct")
+
+
+def _naver_rows(text, suffix):
+    out = []
+    parts = re.split(r'href="/item/main\.naver\?code=(\d{6})"[^>]*class="tltle">', text)
+    for i in range(1, len(parts), 2):
+        code, chunk = parts[i], parts[i + 1]
+        nums = [re.sub(r"<[^>]+>", "", x).strip()
+                for x in re.findall(r'<td class="number">(.*?)</td>', chunk, flags=re.DOTALL)]
+        if len(nums) < 5 or not nums[4].replace(",", "").isdigit():
+            continue
+        name = re.sub(r"<[^>]+>", "", chunk.split("</a>")[0]).strip()
+        out.append((code + suffix, name, int(nums[4].replace(",", ""))))   # 시가총액(억원)
+    return out
+
+
+def naver_caps(sess):
+    """네이버 KOSPI+KOSDAQ → {종목코드: 시가총액(억원)} (ETF·우선주 제외)."""
+    seen = {}
+    for sosok, suf in [(0, ".KS"), (1, ".KQ")]:
+        for pg in (1, 2):
+            try:
+                r = sess.get(f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={pg}", timeout=25)
+                r.encoding = "euc-kr"
+                for code, name, eok in _naver_rows(r.text, suf):
+                    if name.startswith(ETF_PREFIX) or re.search(r"우[0-9]*[A-C]?$", name):
+                        continue
+                    seen[code] = eok
+            except Exception as e:
+                print(f"[warn] naver {sosok}/{pg}: {e}")
+    return seen
+
+
 def main():
     old = {}
     if os.path.exists(OUT):
@@ -103,6 +146,7 @@ def main():
     history = dict(old.get("history", {}))
 
     sess = requests.Session(); sess.headers["User-Agent"] = UA
+    fx = fx_rate(old.get("fx_krw_per_usd", 1513))
     groups, slugs = {}, {}
     for g, url in PAGES.items():
         try:
@@ -114,6 +158,23 @@ def main():
         except Exception as e:
             print(f"[warn] {g} 갱신 실패 → 기존값 유지: {e}")
             groups[g] = old_groups.get(g, [])
+
+    # 한국: 현재 시총을 네이버(보통주, 원화) 값으로 덮어쓰고 재정렬 (코드/로고/history 는 cmc 유지)
+    try:
+        ncaps = naver_caps(sess)
+        if ncaps and groups.get("KR"):
+            hit = 0
+            for r in groups["KR"]:
+                ncode = CMC_TO_NAVER.get(r["sym"], r["sym"])
+                if ncode in ncaps:
+                    r["now"] = round(ncaps[ncode] / (fx * 10), 2)   # 억원 → 10억USD(표시 시 ×fx 로 정확히 원복)
+                    hit += 1
+            groups["KR"].sort(key=lambda r: -r["now"])
+            print(f"[ok] 한국 {hit}/50 종목 네이버 시총 적용")
+        else:
+            print("[warn] 네이버 시총 비어있음 → cmc 값 유지")
+    except Exception as e:
+        print(f"[warn] 네이버 적용 실패 → cmc 값 유지: {e}")
 
     # 과거 history 가 부실한(2020~2025 4년 미만) 종목만 보강
     need = [c for c in slugs if sum(1 for y in history.get(c, {}) if int(y) < 2026) < 4]
@@ -128,10 +189,9 @@ def main():
     for sym, now in now_map.items():
         h = history.get(sym, {}); h["2026"] = now; history[sym] = h
 
-    fx = fx_rate(old.get("fx_krw_per_usd", 1513))
     kst = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
-    out = {"as_of": kst.strftime("%Y-%m-%d"), "fx_krw_per_usd": fx,
-           "source": "companiesmarketcap.com", "groups": groups, "history": history}
+    out = {"as_of": kst.strftime("%Y-%m-%d"), "updated_at": kst.strftime("%Y-%m-%d %H:%M"), "fx_krw_per_usd": fx,
+           "source": "companiesmarketcap.com (KR: naver finance)", "groups": groups, "history": history}
     tmp = OUT + ".tmp"
     json.dump(out, open(tmp, "w", encoding="utf-8"), ensure_ascii=False, indent=0)
     os.replace(tmp, OUT)   # 원자적 교체(서버가 반쪽 파일 읽지 않도록)

@@ -1,8 +1,9 @@
-const T0 = Date.parse("2020-12-31"), T2023 = Date.parse("2023-12-31"), T1 = Date.parse("2024-12-31"), T2 = Date.parse("2026-06-15"), DAY = 86400000;
+const T0 = dateTs("2020-12-31"), T2023 = dateTs("2023-12-31"), T1 = dateTs("2024-12-31"), DAY = 86400000;
+let T2 = dateTs("2026-06-15");
 const TABS = [["ALL","전체","🌐"],["US","미국","🇺🇸"],["KR","한국","🇰🇷"]];
 const SORTS = [["rank","현재 순위"],["climb","순위 급상승"],["pct","시총 상승률"]];
-const YEAR_MARKS = [["2020",T0],["2021",Date.parse("2021-12-31")],["2022",Date.parse("2022-12-31")],["2023",T2023],["2024",T1],["2025",Date.parse("2025-12-31")],["현재",T2]];
-const PRESETS = YEAR_MARKS.map(([label, ts]) => [label === "현재" ? "현재" : `${label}년`, ts]);
+let YEAR_MARKS = [["2020",T0],["2021",dateTs("2021-12-31")],["2022",dateTs("2022-12-31")],["2023",T2023],["2024",T1],["2025",dateTs("2025-12-31")],["현재",T2]];
+let PRESETS = YEAR_MARKS.map(([label, ts]) => [label === "현재" ? "현재" : `${label}년`, ts]);
 const FLAG = { US:"🇺🇸",KR:"🇰🇷",CN:"🇨🇳",TW:"🇹🇼",SR:"🇸🇦",NL:"🇳🇱",UK:"🇬🇧",CH:"🇨🇭",JP:"🇯🇵" };
 const C = { ink:"#0E1726",sub:"#5B6472",faint:"#8A93A2",border:"#E7EAF0",borderStrong:"#D5DAE3",up:"#E23B3E",down:"#1F6FE5",upBg:"#FCEAEB",downBg:"#E9F1FD",chip:"#EEF0F4" };
 const FLOW_LIMIT = 20;
@@ -28,12 +29,16 @@ const INVESTING = {
   "005930.KS":"samsung-electronics-co-ltd", "000660.KS":"sk-hynix-inc"
 };
 
-const state = { tab:"ALL", cache:{}, loading:false, selTs:T0, sort:"rank", open:null };
+const state = { tab:"ALL", cache:{}, meta:{}, loading:false, selTs:T0, sort:"rank", open:null, newOpen:false };
 const root = document.getElementById("root");
 let dragRenderTimer = null;
 let draggingDate = false;
 
 function esc(v) { return String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c])); }
+function dateTs(iso) {
+  const [y, m, d] = String(iso || "").split("-").map(Number);
+  return y && m && d ? new Date(y, m - 1, d).getTime() : NaN;
+}
 function ticker(s) { return s.split(".")[0].replace("-", "."); }
 function fmtCap(v) {
   const jo = v * FX / 1000;  // v: 10억 USD -> 조원
@@ -44,10 +49,19 @@ function fmtCap(v) {
 }
 function fmtPct(p) { return `${p > 0 ? "+" : ""}${p.toFixed(Math.abs(p) >= 100 ? 0 : 1)}%`; }
 function fmtDate(ts) { const d = new Date(ts); return `${d.getFullYear()}.${String(d.getMonth()+1).padStart(2,"0")}.${String(d.getDate()).padStart(2,"0")}`; }
-function toISO(ts) { return new Date(ts).toISOString().slice(0,10); }
+function toISO(ts) { const d = new Date(ts); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
+function fmtMonth(ts) { const d = new Date(ts); return `${d.getFullYear()}.${String(d.getMonth()+1).padStart(2,"0")}`; }
+function syncCurrentDate(asOf) {
+  const ts = dateTs(asOf || "");
+  if (Number.isNaN(ts)) return;
+  T2 = ts;
+  YEAR_MARKS = [["2020",T0],["2021",dateTs("2021-12-31")],["2022",dateTs("2022-12-31")],["2023",T2023],["2024",T1],["2025",dateTs("2025-12-31")],["현재",T2]];
+  PRESETS = YEAR_MARKS.map(([label, t]) => [label === "현재" ? "현재" : `${label}년`, t]);
+  if (state.selTs > T2) state.selTs = T2;
+}
 function histPoints(c) {
   const pts = [], h = c.hist || {};
-  for (const y in h) { const Y = +y; pts.push([Y >= 2026 ? T2 : Date.parse(`${Y}-12-31`), h[y]]); }
+  for (const y in h) { const Y = +y; pts.push([Y >= 2026 ? T2 : dateTs(`${Y}-12-31`), h[y]]); }
   if (!pts.length) pts.push([T2, c.now]);
   return pts.sort((a, b) => a[0] - b[0]);
 }
@@ -141,9 +155,12 @@ async function loadTab(tab) {
     const r = await fetch(`/api/rankings?group=${tab}`);
     const d = await r.json();
     if (d.fx_krw_per_usd) FX = d.fx_krw_per_usd;
+    syncCurrentDate(d.as_of);
+    state.meta[tab] = { as_of:d.as_of || "", updated_at:d.updated_at || d.as_of || "", source:d.source || "" };
     state.cache[tab] = d.companies || [];
   } catch {
     state.cache[tab] = [];
+    state.meta[tab] = { as_of:"", updated_at:"", source:"" };
   }
   state.loading = false; render();
 }
@@ -171,10 +188,17 @@ function statsHtml(rows) {
   const climber = [...rows].filter(r=>r.delta!=null).sort((a,b)=>b.delta-a.delta)[0];
   const gainer = [...rows].filter(r=>r.pct!=null).sort((a,b)=>b.pct-a.pct)[0];
   const enter = rows.filter(d=>d.newRank<=FLOW_LIMIT && (d.isNewEntry || d.oldRank>FLOW_LIMIT)).sort((a,b)=>a.newRank-b.newRank);
+  const newCard = enter.length
+    ? `<div class="card card-toggle${state.newOpen?" open":""}" data-toggle="new">
+        <div class="card-label">TOP 20 신규 진입 <span class="card-chev">▾</span></div>
+        <div class="card-row"><b>${state.newOpen?"신규 진입 종목":esc(briefNames(enter))}</b><span>${enter.length}개</span></div>
+        ${state.newOpen?`<div class="card-list">${enter.map(d=>`<div><span>${d.newRank}위</span>${esc(d.name)}</div>`).join("")}</div>`:`<div class="card-sub">눌러서 전체 보기</div>`}
+      </div>`
+    : card("TOP 20 신규 진입","없음","변동 없음","0개",C.ink);
   return `<div class="stats">
     ${climber ? card("순위 최대 상승", climber.name, `${climber.oldRank}위 → ${climber.newRank}위`, climber.delta>0?`▲ ${climber.delta}계단`:"-", C.up) : card("순위 최대 상승","-","변동 없음","-")}
     ${gainer ? card("시총 최대 상승률", gainer.name, `${fmtCap(gainer.oldCap)} → ${fmtCap(gainer.now)}`, fmtPct(gainer.pct), C.up) : card("시총 최대 상승률","-","변동 없음","-")}
-    ${card("TOP 20 신규 진입", enter.length?briefNames(enter):"없음", enter.length?`${enter.length}개 종목이 새로 진입`:"변동 없음", `${enter.length}개`, C.ink)}
+    ${newCard}
   </div>`;
 }
 
@@ -189,7 +213,7 @@ function flowRow(item, side, index, limit, showFlag) {
   const subRank = isPast ? `현재 ${item.newRank}위` : item.isNewEntry ? "신규 진입" : item.oldRank > limit ? `이전 TOP ${limit} 밖` : `${item.oldRank}위 → ${item.newRank}위`;
   return `<div class="flow-row ${isNew?"is-new":""}" data-flow-key="${side}-${esc(item.sym)}" style="transform:translateY(${index*60}px)">
     <div class="flow-rank">${rank}</div>${logoSlot("flow-"+side,item.sym,item.name)}
-    <div class="flow-main"><div class="flow-name"><span>${esc(item.name)}</span>${badge}</div><div class="muted">${showFlag?(FLAG[item.cc]||"🌐")+" ":""}${esc(ticker(item.sym))} · ${fmtCap(cap)}</div></div>
+    <div class="flow-main"><div class="flow-name"><span>${esc(item.name)}</span>${badge}</div><div class="muted">${showFlag?(FLAG[item.cc]||"🌐")+" ":""}${esc(ticker(item.sym))}<span class="sep"></span>${fmtCap(cap)}</div></div>
     <div class="flow-move ${up?"up":down?"down":""}"><b>${move}</b><span>${esc(subRank)}</span></div>
   </div>`;
 }
@@ -262,7 +286,7 @@ function detail(r, list) {
   const r2 = r.newRank, rSel = r.oldRank, pct = r.pct;
   const moveColor = r.delta > 0 ? C.up : r.delta < 0 ? C.down : C.faint;
   const moveText = r.isNewEntry ? "신규 진입" : r.delta > 0 ? `▲ ${r.delta}계단 상승` : r.delta < 0 ? `▼ ${Math.abs(r.delta)}계단 하락` : "순위 변동 없음";
-  const graphMarks = [["2020",T0],["2021",Date.parse("2021-12-31")],["2022",Date.parse("2022-12-31")],["2023",T2023],["2024",T1],["2025",Date.parse("2025-12-31")],["현재",T2]];
+  const graphMarks = [["2020",T0],["2021",dateTs("2021-12-31")],["2022",dateTs("2022-12-31")],["2023",T2023],["2024",T1],["2025",dateTs("2025-12-31")],["현재",T2]];
   const points = graphMarks.map(([label, ts], i) => ({ label, ts, rank:ts===T2?r2:rankOf(list,r.sym,ts), cap:ts===T2?r.now:capAt(r,ts), x:28+i*(304/6) }));
   const valid = points.filter(p=>p.rank!=null);
   const min = Math.min(...valid.map(p=>p.rank)), max = Math.max(...valid.map(p=>p.rank)), span = Math.max(1, max-min);
@@ -302,14 +326,16 @@ function listHtml(rows, list) {
 
 function render() {
   const list = state.cache[state.tab] || [];
+  const meta = state.meta[state.tab] || {};
+  const lastUpdated = meta.updated_at || "-";
   const rows = getRows(list);
   root.innerHTML = `<main>
     <header><div class="topline">시총 TOP 50 · 순위 변화 추적</div><h1>지금 몇 위로 올라왔나</h1><p>전체 또는 나라를 고르고, 과거 시점을 선택해 순위가 몇 계단 움직였는지·시총이 몇 % 변했는지 확인하세요.</p></header>
     <nav>${TABS.map(([code,label,flag])=>`<button class="${state.tab===code?"on":""}" data-tab="${code}"><span>${flag}</span>${label}</button>`).join("")}</nav>
     <section class="datebox"><div><span>비교 시점</span><b id="selectedDateLabel">${fmtDate(state.selTs)}</b><em>→ 현재 (${fmtDate(T2)})</em></div>
       <input class="rank-range" id="dateRange" type="range" min="${T0}" max="${T2}" step="${DAY}" value="${state.selTs}" style="background:${rangeBg(state.selTs)}">
-      <div class="range-labels"><span>2020.12</span><span>2023.12</span><span>2026.06</span></div>
-      <div class="presets"><input id="dateInput" type="date" min="2020-12-31" max="2026-06-15" value="${toISO(state.selTs)}">${PRESETS.map(([label,ts])=>`<button class="${Math.abs(state.selTs-ts)<DAY?"on":""}" data-date="${ts}">${label}</button>`).join("")}</div>
+      <div class="range-labels"><span>2020.12</span><span>2023.12</span><span>${fmtMonth(T2)}</span></div>
+      <div class="presets"><input id="dateInput" type="date" min="2020-12-31" max="${toISO(T2)}" value="${toISO(state.selTs)}">${PRESETS.map(([label,ts])=>`<button class="${Math.abs(state.selTs-ts)<DAY?"on":""}" data-date="${ts}">${label}</button>`).join("")}</div>
     </section>
     <div id="liveComparison">${liveComparisonHtml(list)}</div>
     <section class="sorts">${SORTS.map(([k,l])=>`<button class="${state.sort===k?"on":""}" data-sort="${k}">${l}</button>`).join("")}</section>
@@ -317,7 +343,8 @@ function render() {
     ${listHtml(rows,list)}
     <footer>
       <p><b>시가총액 순위 추적기</b> — 전 세계·미국·한국 시가총액 상위 50개 기업의 순위가 과거 시점 대비 어떻게 변했는지 원화로 보여주는 서비스입니다.</p>
-      <p>데이터 제공: <a href="https://companiesmarketcap.com" target="_blank" rel="noopener noreferrer">companiesmarketcap.com</a> · 1$≈${Math.round(FX).toLocaleString("ko-KR")}원 환산 · 환율·시총 매일 오전 7시(KST) 자동 갱신 · 로고는 각 기업의 상표이며 식별 목적으로 표시합니다.</p>
+      <p>데이터 제공: 전 세계·미국 <a href="https://companiesmarketcap.com" target="_blank" rel="noopener noreferrer">companiesmarketcap.com</a>, 한국 <a href="https://finance.naver.com/sise/sise_market_sum.naver" target="_blank" rel="noopener noreferrer">네이버 금융</a> · 1$≈${Math.round(FX).toLocaleString("ko-KR")}원 환산 · 매일 오전 7시(KST) 자동 갱신 · 로고는 각 기업의 상표로 식별 목적 표시.</p>
+      <p><b>최근 업데이트</b> ${esc(lastUpdated)} <span>한국시간 기준</span></p>
     </footer>
   </main>`;
   hydrateLogos(root);
@@ -327,11 +354,12 @@ root.addEventListener("click", (e) => {
   const tab = e.target.closest("[data-tab]"); if (tab) { state.tab = tab.dataset.tab; state.open = null; loadTab(state.tab); return; }
   const date = e.target.closest("[data-date]"); if (date) { state.selTs = Number(date.dataset.date); render(); return; }
   const sort = e.target.closest("[data-sort]"); if (sort) { state.sort = sort.dataset.sort; render(); return; }
+  const tog = e.target.closest("[data-toggle='new']"); if (tog) { state.newOpen = !state.newOpen; refreshLiveComparison(); return; }
   const row = e.target.closest(".row"); if (row && !e.target.closest("a")) { state.open = state.open === row.dataset.sym ? null : row.dataset.sym; render(); }
 });
 root.addEventListener("input", (e) => {
   if (e.target.id === "dateRange") { state.selTs = Number(e.target.value); syncDateControls(state.selTs); refreshLiveComparison(true); if (!draggingDate) scheduleDragRender(); }
-  if (e.target.id === "dateInput") { const t = Date.parse(e.target.value); if (!isNaN(t)) { state.selTs = Math.min(T2, Math.max(T0, t)); render(); } }
+  if (e.target.id === "dateInput") { const t = dateTs(e.target.value); if (!isNaN(t)) { state.selTs = Math.min(T2, Math.max(T0, t)); render(); } }
 });
 root.addEventListener("pointerdown", (e) => {
   if (e.target.id === "dateRange") draggingDate = true;
@@ -347,10 +375,27 @@ function injectStyle() {
   main{max-width:760px;margin:0 auto;padding:20px 14px 40px;color:${C.ink};font-variant-numeric:tabular-nums} .topline{font-size:12px;font-weight:700;letter-spacing:1.4px;color:${C.faint};margin-bottom:8px} h1{font-size:26px;margin:0 0 8px;font-weight:850} header p{font-size:14px;color:${C.sub};line-height:1.55;margin:0 0 16px}
   nav{display:flex;gap:7px;margin-bottom:16px}button{font-family:inherit}nav button{flex:1;border:1px solid ${C.border};background:#fff;border-radius:12px;padding:11px 6px;font-weight:850;font-size:14px;cursor:pointer}nav button.on{background:${C.ink};color:#fff;border-color:${C.ink}}nav span{margin-right:5px}
   .datebox,.panel,.card{background:#fff;border:1px solid ${C.border};border-radius:14px}.datebox{padding:16px;margin-bottom:18px}.datebox>div:first-child{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:14px}.datebox span{font-size:13px;color:${C.sub};font-weight:700}.datebox b{font-size:22px}.datebox em{font-style:normal;color:${C.faint};font-size:13px}.rank-range{width:100%;cursor:pointer}.range-labels{display:flex;justify-content:space-between;font-size:11px;color:${C.faint};margin-top:6px}.presets{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.presets input{padding:8px 11px;border:1px solid ${C.border};border-radius:9px;font:inherit}.presets button,.sorts button{border:1px solid transparent;border-radius:999px;padding:8px 13px;background:${C.chip};font-weight:800;color:${C.sub};cursor:pointer}.presets button.on{background:#fff;color:${C.ink};border-color:${C.borderStrong};box-shadow:0 1px 4px rgba(14,23,38,.08)}.sorts button.on{background:${C.ink};color:#fff}
-  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:18px}.card{padding:13px 14px}.card-label{font-size:11.5px;color:${C.faint};font-weight:800}.card-row{display:flex;justify-content:space-between;gap:8px;margin-top:7px}.card-row b{font-size:15px;line-height:1.25}.card-row span{font-size:13.5px;font-weight:900;white-space:nowrap}.card-sub{font-size:12px;color:${C.sub};margin-top:4px}
-  .panel{padding:15px 16px 17px;margin-bottom:18px;overflow:hidden}.panel-head{display:flex;justify-content:space-between;gap:12px;align-items:baseline;margin-bottom:13px}.eyebrow{font-size:12px;font-weight:800;color:${C.faint}}.panel h2{font-size:17px;margin:3px 0 0}.panel-head>span{font-size:12px;color:${C.sub};white-space:nowrap}.flow-wrap{overflow-x:auto}.flow-grid{min-width:0;display:grid;grid-template-columns:minmax(0,1fr) 88px minmax(0,1fr);gap:10px}.flow-title{height:50px;display:flex;align-items:flex-start;justify-content:space-between;position:relative}.flow-title b{font-size:12px}.flow-title span{font-size:11px;background:${C.chip};border-radius:999px;padding:4px 8px;font-weight:900;color:${C.sub}}.flow-title em{position:absolute;left:0;top:20px;font-style:normal;font-size:11.5px;color:${C.faint}}.flow-board{position:relative}.flow-row{position:absolute;left:0;right:0;height:52px;display:flex;align-items:center;gap:8px;border:1px solid ${C.border};border-radius:9px;background:#fff;padding:7px 9px;box-sizing:border-box}.flow-row.is-new{border-left:4px solid ${C.up};padding-left:6px;background:linear-gradient(90deg,rgba(226,59,62,.055),#FBFCFD 26%)}.flow-rank{width:24px;text-align:center;font-size:15px;font-weight:900}.logo{width:38px;height:38px;border-radius:6px;object-fit:contain;background:#fff;padding:2px;flex-shrink:0}.logo-skel{display:inline-block}.flow-main{min-width:0;flex:1}.flow-name{display:flex;align-items:center;gap:5px;min-width:0}.flow-name span:first-child{font-size:13.5px;font-weight:900;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.muted{font-size:11.5px;color:${C.faint};white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.mini{font-size:9.5px;font-weight:900;border-radius:999px;padding:2px 5px;line-height:1}.mini.new{background:${C.up};color:#fff}.flow-move{text-align:right;flex-shrink:0;min-width:46px}.flow-move b{display:block;font-size:11.5px;background:${C.chip};border-radius:7px;padding:3px 6px}.flow-move.up b{color:${C.up};background:${C.upBg}}.flow-move.down b{color:${C.down};background:${C.downBg}}.flow-move span{font-size:10.5px;color:${C.faint};font-weight:800}.flow-svg{position:relative}.flow-svg svg{width:100%;height:calc(100% - 50px);display:block;margin-top:50px;overflow:visible}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:18px}.card{padding:13px 14px}.card-label{font-size:11.5px;color:${C.faint};font-weight:800}.card-row{display:flex;justify-content:space-between;gap:8px;margin-top:7px}.card-row b{font-size:15px;line-height:1.25}.card-row span{font-size:13.5px;font-weight:900;white-space:nowrap}.card-sub{font-size:12px;color:${C.sub};margin-top:4px}.card-toggle{cursor:pointer}.card-toggle .card-chev{display:inline-block;transition:transform .15s;color:${C.faint};font-size:10px}.card-toggle.open .card-chev{transform:rotate(180deg)}.card-list{margin-top:8px;display:flex;flex-direction:column;gap:5px;max-height:220px;overflow-y:auto}.card-list>div{font-size:12.5px;display:flex;gap:7px}.card-list span{color:${C.faint};font-weight:800;min-width:32px}
+  .panel{padding:15px 16px 17px;margin-bottom:18px;overflow:hidden}.panel-head{display:flex;justify-content:space-between;gap:12px;align-items:baseline;margin-bottom:13px}.eyebrow{font-size:12px;font-weight:800;color:${C.faint}}.panel h2{font-size:17px;margin:3px 0 0}.panel-head>span{font-size:12px;color:${C.sub};white-space:nowrap}.flow-wrap{overflow-x:auto}.flow-grid{min-width:0;display:grid;grid-template-columns:minmax(0,1fr) 88px minmax(0,1fr);gap:10px}.flow-title{height:50px;display:flex;align-items:flex-start;justify-content:space-between;position:relative}.flow-title b{font-size:12px}.flow-title span{font-size:11px;background:${C.chip};border-radius:999px;padding:4px 8px;font-weight:900;color:${C.sub}}.flow-title em{position:absolute;left:0;top:20px;font-style:normal;font-size:11.5px;color:${C.faint}}.flow-board{position:relative}.flow-row{position:absolute;left:0;right:0;height:52px;display:flex;align-items:center;gap:8px;border:1px solid ${C.border};border-radius:9px;background:#fff;padding:7px 9px;box-sizing:border-box}.flow-row.is-new{border-left:4px solid ${C.up};padding-left:6px;background:linear-gradient(90deg,rgba(226,59,62,.055),#FBFCFD 26%)}.flow-rank{width:24px;text-align:center;font-size:15px;font-weight:900}.logo{width:38px;height:38px;border-radius:6px;object-fit:contain;background:#fff;padding:2px;flex-shrink:0}.logo-skel{display:inline-block}.flow-main{min-width:0;flex:1}.flow-name{display:flex;align-items:center;gap:5px;min-width:0}.flow-name span:first-child{font-size:13.5px;font-weight:900;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.muted{font-size:11.5px;color:${C.faint};white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.muted .sep::before{content:" · "}.mini{font-size:9.5px;font-weight:900;border-radius:999px;padding:2px 5px;line-height:1}.mini.new{background:${C.up};color:#fff}.flow-move{text-align:right;flex-shrink:0;min-width:46px}.flow-move b{display:block;font-size:11.5px;background:${C.chip};border-radius:7px;padding:3px 6px}.flow-move.up b{color:${C.up};background:${C.upBg}}.flow-move.down b{color:${C.down};background:${C.downBg}}.flow-move span{font-size:10.5px;color:${C.faint};font-weight:800}.flow-svg{position:relative}.flow-svg svg{width:100%;height:calc(100% - 50px);display:block;margin-top:50px;overflow:visible}
   .sorts{display:flex;justify-content:flex-end;margin-bottom:14px;gap:3px}.legend{font-size:12px;color:${C.sub};margin-bottom:8px}.legend em{color:${C.faint};font-style:normal;margin-left:8px}.list{background:#fff;border:1px solid ${C.border};border-radius:14px;overflow:hidden}.row{display:flex;align-items:center;gap:11px;padding:12px 14px;border-top:1px solid ${C.border};cursor:pointer}.row:first-child{border-top:0}.rank{width:26px;text-align:center;font-size:18px;font-weight:900}.delta{min-width:40px;text-align:center;border-radius:7px;background:${C.chip};font-size:12.5px;font-weight:900;padding:4px 7px}.delta.up{color:${C.up};background:${C.upBg}}.delta.down{color:${C.down};background:${C.downBg}}.co{flex:1;min-width:0}.co b{display:block;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.co span{font-size:12px;color:${C.faint};white-space:nowrap}.cap{text-align:right;min-width:84px}.cap>b{font-size:14.5px}.cap span{display:flex;align-items:center;gap:5px;justify-content:flex-end;font-size:12.5px;font-weight:900}.cap i{display:inline-block;width:28px;height:4px;background:${C.chip};border-radius:3px;overflow:hidden}.cap i i{display:block;height:100%;width:0}.loading{padding:40px;text-align:center;color:${C.faint}}
   .detail{background:#F8FAFC;border-top:1px solid ${C.border};padding:16px}.detail-head{display:flex;align-items:center;gap:11px;margin-bottom:14px}.detail h3{margin:0;font-size:16px}.detail h3 span{font-size:11px;background:${C.chip};color:${C.sub};border-radius:999px;padding:3px 8px}.detail p{margin:3px 0 0;font-size:12px;color:${C.faint}}.detail-head>div{flex:1}.detail-head strong{text-align:right;font-size:20px}.market-links{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}.market-links a{display:flex;align-items:center;justify-content:center;min-height:42px;border:1px solid ${C.borderStrong};border-radius:12px;text-decoration:none;color:${C.ink};font-size:14px;font-weight:900;background:#fff}.chart{background:#fff;border:1px solid ${C.border};border-radius:12px;padding:13px}.chart-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}.chart-head p{margin:2px 0 0}.chart-head span{font-size:11.5px;font-weight:900;background:${C.chip};border-radius:999px;padding:5px 8px;margin-left:6px}.chart svg{width:100%;height:190px;background:#FBFCFD;border-radius:10px;display:block}.rank-points,.notes{display:grid;gap:8px;margin-top:10px}.rank-points{grid-template-columns:repeat(auto-fit,minmax(86px,1fr))}.notes{grid-template-columns:repeat(auto-fit,minmax(160px,1fr))}.rank-points div,.notes div{background:#FBFCFD;border:1px solid ${C.border};border-radius:10px;padding:8px}.rank-points span,.notes span{display:block;font-size:10.5px;color:${C.faint};font-weight:900}.rank-points b,.notes b{display:block;font-size:15px;margin-top:3px}.rank-points em,.notes em{display:block;font-style:normal;font-size:11px;color:${C.sub};font-weight:800;margin-top:1px}footer{font-size:11.5px;color:${C.faint};line-height:1.6;margin-top:16px}footer p{margin:5px 0}footer a{color:${C.sub}}
+  @media (max-width:600px){
+  main{padding:16px 12px 36px}
+  .presets button{display:none}
+  .stats .card:nth-child(1),.stats .card:nth-child(2){display:none}
+  .flow-grid{min-width:0;grid-template-columns:1fr 1fr;gap:8px}
+  .flow-svg{display:none}
+  .flow-move{display:none}
+  .flow-row{gap:4px;padding:5px 6px;align-items:center}
+  .flow-row .logo{width:24px;height:24px}
+  .flow-rank{width:13px;font-size:13px}
+  .flow-name span:first-child{font-size:13px;white-space:normal;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;line-height:1.15}
+  .flow-row .muted{font-size:9.5px;white-space:nowrap;overflow:hidden;text-overflow:clip;letter-spacing:-0.2px}.flow-row .muted .sep::before{content:"/"}
+  .flow-title span{display:none}.flow-title b{font-size:11px}.flow-title em{font-size:10.5px}
+  .row .cap i{display:none}
+  .row .cap{min-width:auto}
+  .row .co span{display:block;overflow:hidden;text-overflow:ellipsis}
+  }
   `;
   document.head.appendChild(style);
 }
